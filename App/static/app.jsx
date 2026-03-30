@@ -46,29 +46,7 @@ function UploadArea({ file, onFileChange }) {
     );
 }
 
-/* ── Video Preview ── */
-function VideoPreview({ file, serverUrl }) {
-    const [localUrl, setLocalUrl] = useState(null);
 
-    useEffect(() => {
-        if (file) {
-            const url = URL.createObjectURL(file);
-            setLocalUrl(url);
-            return () => URL.revokeObjectURL(url);
-        }
-        setLocalUrl(null);
-    }, [file]);
-
-    const src = serverUrl || localUrl;
-    return (
-        <div className="video-preview">
-            {src
-                ? <video controls src={src} key={src} />
-                : <div className="preview-placeholder">&#127916;</div>
-            }
-        </div>
-    );
-}
 
 /* ── Status Spinner ── */
 function StatusIndicator({ status }) {
@@ -82,7 +60,8 @@ function StatusIndicator({ status }) {
 }
 
 /* ── Video Comparison ── */
-function VideoComparison({ file, processedUrl, isProcessing }) {
+const VideoComparison = React.memo(function VideoComparison({ file, processedUrl, isProcessing }) {
+    const videoRef = useRef(null);
     const [localUrl, setLocalUrl] = useState(null);
 
     useEffect(() => {
@@ -94,31 +73,31 @@ function VideoComparison({ file, processedUrl, isProcessing }) {
         setLocalUrl(null);
     }, [file]);
 
-    if (!processedUrl && !isProcessing) return null;
+    if (!localUrl) return null;
+    const showProcessed = processedUrl || isProcessing;
     return (
         <section className="video-compare">
-            <h2>Face Detection</h2>
-            <div className="compare-grid">
+            <h2>{showProcessed ? 'Face Detection' : 'Uploaded Video'}</h2>
+            <div className={`compare-grid${showProcessed ? '' : ' single'}`}>
                 <div className="compare-item">
-                    {localUrl
-                        ? <video controls src={localUrl} key={localUrl} />
-                        : <div className="preview-placeholder">&#127916;</div>
-                    }
+                    <video ref={videoRef} controls src={localUrl} />
                     <div className="compare-label original">Original</div>
                 </div>
-                <div className="compare-item">
-                    {processedUrl
-                        ? <video controls src={processedUrl} key={processedUrl} />
-                        : <div className="preview-placeholder"><div className="spinner" /></div>
-                    }
-                    <div className="compare-label detected">
-                        {processedUrl ? 'Detected Faces' : 'Generating\u2026'}
+                {showProcessed && (
+                    <div className="compare-item">
+                        {processedUrl
+                            ? <video controls src={processedUrl} />
+                            : <div className="preview-placeholder"><div className="spinner" /></div>
+                        }
+                        <div className="compare-label detected">
+                            {processedUrl ? 'Detected Faces' : 'Generating\u2026'}
+                        </div>
                     </div>
-                </div>
+                )}
             </div>
         </section>
     );
-}
+});
 
 /* ── Face Row ── */
 function FaceRow({ face, index }) {
@@ -258,13 +237,12 @@ function App() {
                     {error && <div className="error-box">{error}</div>}
                 </div>
 
-                <VideoPreview file={file} serverUrl={result?.video_url} />
             </section>
 
             <VideoComparison
                 file={file}
                 processedUrl={result?.processed_url}
-                isProcessing={status === 'processing_video'}
+                isProcessing={submitting}
             />
             <ResultsPanel data={result} />
         </>
