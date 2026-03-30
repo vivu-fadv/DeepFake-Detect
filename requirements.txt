@@ -1,0 +1,11 @@
+numpy
+pandas
+tensorflow
+keras>=2.2.0
+opencv-python>=4.1.0
+mtcnn>=0.1.0
+h5py
+split_folders
+flask
+mediapipe
+imageio-ffmpeg
