@@ -115,7 +115,7 @@ def extract_faces_from_video(video_path):
                 results = face_det.detect(mp_image)
                 for detection in results.detections:
                     score = detection.categories[0].score
-                    if len(results.detections) < 2 or score > 0.95:
+                    if score > 0.5:
                         bbox = detection.bounding_box
                         bx, by, bw, bh = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
                         h, w = image_rgb.shape[:2]
@@ -135,12 +135,9 @@ def extract_faces_from_video(video_path):
     return faces
 
 
-def create_processed_video(video_path, output_path, avg_score):
-    """Re-encode video with face bounding boxes and label drawn on every frame."""
+def create_processed_video(video_path, output_path, face_scores=None):
+    """Re-encode video with face bounding boxes and per-face REAL/FAKE label."""
     logger.info('Creating processed video with bounding boxes: %s', output_path)
-    is_real = avg_score is not None and avg_score > 0.5
-    label = 'REAL' if is_real else 'FAKE'
-    color = (0, 255, 0) if is_real else (0, 0, 255)  # green / red in BGR
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
@@ -167,13 +164,32 @@ def create_processed_video(video_path, output_path, avg_score):
             mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=image_rgb)
             results = face_det.detect(mp_image)
             for detection in results.detections:
-                conf = detection.categories[0].score
-                if len(results.detections) < 2 or conf > 0.95:
+                det_score = detection.categories[0].score
+                if det_score > 0.5:
                     bbox = detection.bounding_box
-                    x, y = max(0, bbox.origin_x), max(0, bbox.origin_y)
-                    bw, bh = bbox.width, bbox.height
+                    bx, by, bw, bh = bbox.origin_x, bbox.origin_y, bbox.width, bbox.height
+                    x, y = max(0, bx), max(0, by)
+
+                    # Crop and predict this face individually
+                    margin_x = int(bw * 0.3)
+                    margin_y = int(bh * 0.3)
+                    x1 = max(0, bx - margin_x)
+                    x2 = min(w, bx + bw + margin_x)
+                    y1 = max(0, by - margin_y)
+                    y2 = min(h, by + bh + margin_y)
+                    crop = image_rgb[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        crop_resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE))
+                        face_input = np.array([crop_resized], dtype='float32') / 255.0
+                        score = float(model.predict(face_input, verbose=0)[0][0])
+                    else:
+                        score = 0.0
+
+                    is_real = score > 0.5
+                    label = 'REAL' if is_real else 'FAKE'
+                    color = (0, 255, 0) if is_real else (0, 0, 255)
                     cv2.rectangle(frame, (x, y), (x + bw, y + bh), color, 2)
-                    text = f'{label} {conf:.2f}'
+                    text = f'{label} {score:.2f}'
                     cv2.putText(frame, text, (x, y - 10),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
             out.write(frame)
@@ -287,7 +303,7 @@ def process_video_job(job_id, filepath, unique_name):
         logger.info('[Job %s] Starting video processing', job_id)
         processed_name = f"processed_{unique_name}"
         processed_path = os.path.join(app.config['UPLOAD_FOLDER'], processed_name)
-        create_processed_video(filepath, processed_path, avg_score)
+        create_processed_video(filepath, processed_path)
 
         logger.info('[Job %s] Video processing done', job_id)
         jobs[job_id].update({
