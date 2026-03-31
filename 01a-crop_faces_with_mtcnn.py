@@ -1,7 +1,7 @@
 import cv2
 from mtcnn import MTCNN
+import csv
 import sys, os.path
-import json
 from keras import backend as K
 import tensorflow as tf
 print(tf.__version__)
@@ -13,21 +13,29 @@ if physical_devices:
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
 base_path = '.\\train_sample_videos\\'
+videos_path = os.path.join(base_path, 'Deepfakes')
 
 def get_filename_only(file_path):
     file_basename = os.path.basename(file_path)
     filename_only = file_basename.split('.')[0]
     return filename_only
 
-with open(os.path.join(base_path, 'metadata.json')) as metadata_json:
-    metadata = json.load(metadata_json)
+with open(os.path.join(base_path, 'csv', 'Deepfakes.csv'), newline='', encoding='utf-8') as csvfile:
+    reader = csv.DictReader(csvfile)
+    metadata = {}
+    for row in reader:
+        metadata[row['File Path']] = row['Label'].strip().upper()
     print(len(metadata))
 
 for filename in metadata.keys():
-    tmp_path = os.path.join(base_path, get_filename_only(filename))
+    video_basename = os.path.basename(filename)
+    tmp_path = os.path.join(videos_path, get_filename_only(video_basename))
     print('Processing Directory: ' + tmp_path)
-    frame_images = [x for x in os.listdir(tmp_path) if os.path.isfile(os.path.join(tmp_path, x))]
     faces_path = os.path.join(tmp_path, 'faces')
+    if os.path.isdir(faces_path) and len(os.listdir(faces_path)) > 0:
+        print('Skipping (faces already exist): ' + faces_path)
+        continue
+    frame_images = [x for x in os.listdir(tmp_path) if os.path.isfile(os.path.join(tmp_path, x))]
     print('Creating Directory: ' + faces_path)
     os.makedirs(faces_path, exist_ok=True)
     print('Cropping Faces from Images...')

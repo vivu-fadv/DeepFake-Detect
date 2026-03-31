@@ -142,30 +142,6 @@ history = model.fit(
 )
 print(history.history)
 
-'''
-# Plot results
-import matplotlib.pyplot as plt
-
-acc = history.history['acc']
-val_acc = history.history['val_acc']
-loss = history.history['loss']
-val_loss = history.history['val_loss']
-
-epochs = range(1, len(acc) + 1)
-
-plt.plot(epochs, acc, 'bo', label = 'Training Accuracy')
-plt.plot(epochs, val_acc, 'b', label = 'Validation Accuracy')
-plt.title('Training and Validation Accuracy')
-plt.legend()
-plt.figure()
-
-plt.plot(epochs, loss, 'bo', label = 'Training loss')
-plt.plot(epochs, val_loss, 'b', label = 'Validation Loss')
-plt.title('Training and Validation Loss')
-plt.legend()
-
-plt.show()
-'''
 
 # load the saved model that is considered the best
 best_model = load_model(os.path.join(checkpoint_filepath, 'best_model.h5'))

@@ -1,11 +1,10 @@
-import json
+import csv
 import os
-from distutils.dir_util import copy_tree
 import shutil
 import numpy as np
 import splitfolders as split_folders
 
-base_path = '.\\train_sample_videos\\'
+base_path = '.\\train_sample_videos\\Deepfakes\\'
 dataset_path = '.\\prepared_dataset\\'
 print('Creating Directory: ' + dataset_path)
 os.makedirs(dataset_path, exist_ok=True)
@@ -19,8 +18,11 @@ def get_filename_only(file_path):
     filename_only = file_basename.split('.')[0]
     return filename_only
 
-with open(os.path.join(base_path, 'metadata.json')) as metadata_json:
-    metadata = json.load(metadata_json)
+with open(os.path.join('.\\train_sample_videos\\csv\\', 'Deepfakes.csv'), newline='', encoding='utf-8') as csvfile:
+    reader = csv.DictReader(csvfile)
+    metadata = {}
+    for row in reader:
+        metadata[row['File Path']] = row['Label'].strip().upper()
     print(len(metadata))
 
 real_path = os.path.join(dataset_path, 'real')
@@ -31,18 +33,18 @@ fake_path = os.path.join(dataset_path, 'fake')
 print('Creating Directory: ' + fake_path)
 os.makedirs(fake_path, exist_ok=True)
 
-for filename in metadata.keys():
+for filename, label in metadata.items():
     print(filename)
-    print(metadata[filename]['label'])
+    print(label)
     tmp_path = os.path.join(os.path.join(base_path, get_filename_only(filename)), 'faces')
     print(tmp_path)
     if os.path.exists(tmp_path):
-        if metadata[filename]['label'] == 'REAL':    
+        if label == 'REAL':
             print('Copying to :' + real_path)
-            copy_tree(tmp_path, real_path)
-        elif metadata[filename]['label'] == 'FAKE':
+            shutil.copytree(tmp_path, real_path, dirs_exist_ok=True)
+        elif label == 'FAKE':
             print('Copying to :' + tmp_fake_path)
-            copy_tree(tmp_path, tmp_fake_path)
+            shutil.copytree(tmp_path, tmp_fake_path, dirs_exist_ok=True)
         else:
             print('Ignored..')
 
