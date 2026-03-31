@@ -1,28 +1,33 @@
-import json
+import csv
 import os
 import cv2
 import math
 
 base_path = '.\\train_sample_videos\\'
+videos_path = os.path.join(base_path, 'Deepfakes')
 
 def get_filename_only(file_path):
     file_basename = os.path.basename(file_path)
     filename_only = file_basename.split('.')[0]
     return filename_only
 
-with open(os.path.join(base_path, 'metadata.json')) as metadata_json:
-    metadata = json.load(metadata_json)
+with open(os.path.join(base_path, 'csv', 'Deepfakes.csv'), newline='', encoding='utf-8') as csvfile:
+    reader = csv.DictReader(csvfile)
+    metadata = {}
+    for row in reader:
+        metadata[row['File Path']] = row['Label'].strip().upper()
     print(len(metadata))
 
 for filename in metadata.keys():
-    print(filename)
-    if (filename.endswith(".mp4")):
-        tmp_path = os.path.join(base_path, get_filename_only(filename))
+    video_basename = os.path.basename(filename)
+    print(video_basename)
+    if (video_basename.endswith(".mp4")):
+        tmp_path = os.path.join(videos_path, get_filename_only(video_basename))
         print('Creating Directory: ' + tmp_path)
         os.makedirs(tmp_path, exist_ok=True)
         print('Converting Video to Images...')
         count = 0
-        video_file = os.path.join(base_path, filename)
+        video_file = os.path.join(videos_path, video_basename)
         cap = cv2.VideoCapture(video_file)
         frame_rate = cap.get(5) #frame rate
         while(cap.isOpened()):
