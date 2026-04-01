@@ -7,5 +7,7 @@ mtcnn>=0.1.0
 h5py
 split_folders
 flask
+werkzeug
 mediapipe
 imageio-ffmpeg
+pillow
