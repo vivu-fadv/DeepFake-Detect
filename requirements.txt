@@ -8,6 +8,6 @@ h5py
 split_folders
 flask
 werkzeug
-mediapipe
+ultralytics
 imageio-ffmpeg
 pillow
