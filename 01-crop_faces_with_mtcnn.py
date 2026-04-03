@@ -12,67 +12,88 @@ print(physical_devices)
 if physical_devices:
     tf.config.experimental.set_memory_growth(physical_devices[0], True)
 
-base_path = '.\\train_sample_videos\\'
-videos_path = os.path.join(base_path, 'Deepfakes')
+base_path = '.\\train_sample_videos\\FaceForensics++_C23\\'
 
 def get_filename_only(file_path):
     file_basename = os.path.basename(file_path)
     filename_only = file_basename.split('.')[0]
     return filename_only
 
-with open(os.path.join(base_path, 'csv', 'Deepfakes.csv'), newline='', encoding='utf-8') as csvfile:
-    reader = csv.DictReader(csvfile)
-    metadata = {}
-    for row in reader:
-        metadata[row['File Path']] = row['Label'].strip().upper()
-    print(len(metadata))
-
-for filename in metadata.keys():
-    video_basename = os.path.basename(filename)
-    tmp_path = os.path.join(videos_path, get_filename_only(video_basename))
-    print('Processing Directory: ' + tmp_path)
-    faces_path = os.path.join(tmp_path, 'faces')
-    if os.path.isdir(faces_path) and len(os.listdir(faces_path)) > 0:
-        print('Skipping (faces already exist): ' + faces_path)
+# Iterate over all subfolders in base_path (excluding 'csv')
+for folder_name in sorted(os.listdir(base_path)):
+    folder_path = os.path.join(base_path, folder_name)
+    if not os.path.isdir(folder_path) or folder_name == 'csv':
         continue
-    frame_images = [x for x in os.listdir(tmp_path) if os.path.isfile(os.path.join(tmp_path, x))]
-    print('Creating Directory: ' + faces_path)
-    os.makedirs(faces_path, exist_ok=True)
-    print('Cropping Faces from Images...')
 
-    for frame in frame_images:
-        print('Processing ', frame)
-        detector = MTCNN()
-        image = cv2.cvtColor(cv2.imread(os.path.join(tmp_path, frame)), cv2.COLOR_BGR2RGB)
-        results = detector.detect_faces(image)
-        print('Face Detected: ', len(results))
-        count = 0
-        
-        for result in results:
-            bounding_box = result['box']
-            print(bounding_box)
-            confidence = result['confidence']
-            print(confidence)
-            if len(results) < 2 or confidence > 0.95:
-                margin_x = bounding_box[2] * 0.3  # 30% as the margin
-                margin_y = bounding_box[3] * 0.3  # 30% as the margin
-                x1 = int(bounding_box[0] - margin_x)
-                if x1 < 0:
-                    x1 = 0
-                x2 = int(bounding_box[0] + bounding_box[2] + margin_x)
-                if x2 > image.shape[1]:
-                    x2 = image.shape[1]
-                y1 = int(bounding_box[1] - margin_y)
-                if y1 < 0:
-                    y1 = 0
-                y2 = int(bounding_box[1] + bounding_box[3] + margin_y)
-                if y2 > image.shape[0]:
-                    y2 = image.shape[0]
-                print(x1, y1, x2, y2)
-                crop_image = image[y1:y2, x1:x2]
-                new_filename = '{}-{:02d}.png'.format(os.path.join(faces_path, get_filename_only(frame)), count)
-                count = count + 1
-                cv2.imwrite(new_filename, cv2.cvtColor(crop_image, cv2.COLOR_RGB2BGR))
-            else:
-                print('Skipped a face..')
+    csv_file = os.path.join(base_path, 'csv', folder_name + '.csv')
+    if not os.path.isfile(csv_file):
+        print(f'CSV not found for {folder_name}, skipping: {csv_file}')
+        continue
+
+    print(f'\n{"="*60}')
+    print(f'Processing folder: {folder_name}')
+    print(f'{"="*60}')
+
+    with open(csv_file, newline='', encoding='utf-8') as csvfile:
+        reader = csv.DictReader(csvfile)
+        metadata = {}
+        for row in reader:
+            metadata[row['File Path']] = row['Label'].strip().upper()
+        print(f'{folder_name}: {len(metadata)} entries')
+
+    for filename in metadata.keys():
+        video_basename = os.path.basename(filename)
+        tmp_path = os.path.join(folder_path, get_filename_only(video_basename))
+        print('Processing Directory: ' + tmp_path)
+        faces_path = os.path.join(tmp_path, 'faces')
+        if os.path.isdir(faces_path) and len(os.listdir(faces_path)) > 0:
+            print('Skipping (faces already exist): ' + faces_path)
+            continue
+        if not os.path.isdir(tmp_path):
+            print('Directory not found, skipping: ' + tmp_path)
+            continue
+        frame_images = [x for x in os.listdir(tmp_path) if os.path.isfile(os.path.join(tmp_path, x))]
+        print('Creating Directory: ' + faces_path)
+        os.makedirs(faces_path, exist_ok=True)
+        print('Cropping Faces from Images...')
+
+        for frame in frame_images:
+            print('Processing ', frame)
+            try:
+                detector = MTCNN()
+                image = cv2.cvtColor(cv2.imread(os.path.join(tmp_path, frame)), cv2.COLOR_BGR2RGB)
+                results = detector.detect_faces(image)
+            except Exception as e:
+                print(f'Error detecting faces in {frame}: {e}')
+                continue
+            print('Face Detected: ', len(results))
+            count = 0
+            
+            for result in results:
+                bounding_box = result['box']
+                print(bounding_box)
+                confidence = result['confidence']
+                print(confidence)
+                if len(results) < 2 or confidence > 0.95:
+                    margin_x = bounding_box[2] * 0.3  # 30% as the margin
+                    margin_y = bounding_box[3] * 0.3  # 30% as the margin
+                    x1 = int(bounding_box[0] - margin_x)
+                    if x1 < 0:
+                        x1 = 0
+                    x2 = int(bounding_box[0] + bounding_box[2] + margin_x)
+                    if x2 > image.shape[1]:
+                        x2 = image.shape[1]
+                    y1 = int(bounding_box[1] - margin_y)
+                    if y1 < 0:
+                        y1 = 0
+                    y2 = int(bounding_box[1] + bounding_box[3] + margin_y)
+                    if y2 > image.shape[0]:
+                        y2 = image.shape[0]
+                    print(x1, y1, x2, y2)
+                    crop_image = image[y1:y2, x1:x2]
+                    new_filename = '{}-{:02d}.png'.format(os.path.join(faces_path, get_filename_only(frame)), count)
+                    count = count + 1
+                    cv2.imwrite(new_filename, cv2.cvtColor(crop_image, cv2.COLOR_RGB2BGR))
+                else:
+                    print('Skipped a face..')
     
