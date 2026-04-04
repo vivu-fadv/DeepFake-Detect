@@ -14,6 +14,8 @@ if physical_devices:
 
 base_path = '.\\train_sample_videos\\FaceForensics++_C23\\'
 
+detector = MTCNN()
+
 def get_filename_only(file_path):
     file_basename = os.path.basename(file_path)
     filename_only = file_basename.split('.')[0]
@@ -60,7 +62,6 @@ for folder_name in sorted(os.listdir(base_path)):
         for frame in frame_images:
             print('Processing ', frame)
             try:
-                detector = MTCNN()
                 image = cv2.cvtColor(cv2.imread(os.path.join(tmp_path, frame)), cv2.COLOR_BGR2RGB)
                 results = detector.detect_faces(image)
             except Exception as e:
