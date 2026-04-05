@@ -27,14 +27,16 @@ def get_filename_only(file_path):
     filename_only = file_basename.split('.')[0]
     return filename_only
 
+import numpy as np
+from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras import applications
 from tensorflow.keras.applications import EfficientNetB0
-from tensorflow.keras.models import Sequential
+from tensorflow.keras.applications.efficientnet import preprocess_input
+from tensorflow.keras.models import Sequential, load_model
 from tensorflow.keras.layers import Dense, Dropout
 from tensorflow.keras.optimizers import Adam
-from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-from tensorflow.keras.models import load_model
+from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
 input_size = 128
 batch_size_num = 32
@@ -43,13 +45,15 @@ val_path = os.path.join(dataset_path, 'val')
 test_path = os.path.join(dataset_path, 'test')
 
 train_datagen = ImageDataGenerator(
-    rescale = 1/255,    #rescale the tensor values to [0,1]
-    rotation_range = 10,
-    width_shift_range = 0.1,
-    height_shift_range = 0.1,
+    preprocessing_function = preprocess_input,
+    rotation_range = 15,
+    width_shift_range = 0.15,
+    height_shift_range = 0.15,
     shear_range = 0.2,
-    zoom_range = 0.1,
+    zoom_range = 0.15,
     horizontal_flip = True,
+    brightness_range = [0.8, 1.2],
+    channel_shift_range = 30,
     fill_mode = 'nearest'
 )
 
@@ -57,28 +61,33 @@ train_generator = train_datagen.flow_from_directory(
     directory = train_path,
     target_size = (input_size, input_size),
     color_mode = "rgb",
-    class_mode = "binary",  #"categorical", "binary", "sparse", "input"
+    class_mode = "binary",
     batch_size = batch_size_num,
     shuffle = True
-    #save_to_dir = tmp_debug_path
 )
 
+# Compute class weights to handle imbalance
+class_weights = compute_class_weight('balanced', classes=np.unique(train_generator.classes), y=train_generator.classes)
+class_weight_dict = dict(enumerate(class_weights))
+print(f'Class mapping: {train_generator.class_indices}')
+print(f'Class weights: {class_weight_dict}')
+print(f'Train samples - fake: {np.sum(train_generator.classes == 0)}, real: {np.sum(train_generator.classes == 1)}')
+
 val_datagen = ImageDataGenerator(
-    rescale = 1/255    #rescale the tensor values to [0,1]
+    preprocessing_function = preprocess_input
 )
 
 val_generator = val_datagen.flow_from_directory(
     directory = val_path,
     target_size = (input_size, input_size),
     color_mode = "rgb",
-    class_mode = "binary",  #"categorical", "binary", "sparse", "input"
+    class_mode = "binary",
     batch_size = batch_size_num,
     shuffle = True
-    #save_to_dir = tmp_debug_path
 )
 
 test_datagen = ImageDataGenerator(
-    rescale = 1/255    #rescale the tensor values to [0,1]
+    preprocessing_function = preprocess_input
 )
 
 test_generator = test_datagen.flow_from_directory(
@@ -86,28 +95,29 @@ test_generator = test_datagen.flow_from_directory(
     classes=['fake', 'real'],
     target_size = (input_size, input_size),
     color_mode = "rgb",
-    class_mode = None,
+    class_mode = "binary",
     batch_size = 1,
     shuffle = False
 )
 
-# Train a CNN classifier
+# --- Phase 1: Train with frozen base ---
 efficient_net = EfficientNetB0(
     weights = 'imagenet',
     input_shape = (input_size, input_size, 3),
     include_top = False,
     pooling = 'max'
 )
+efficient_net.trainable = False  # freeze base initially
 
 model = Sequential()
 model.add(efficient_net)
 model.add(Dense(units = 512, activation = 'relu'))
 model.add(Dropout(0.5))
 model.add(Dense(units = 128, activation = 'relu'))
+model.add(Dropout(0.3))
 model.add(Dense(units = 1, activation = 'sigmoid'))
 model.summary()
 
-# Compile model
 model.compile(optimizer = Adam(learning_rate=0.0001), loss='binary_crossentropy', metrics=['accuracy'])
 
 checkpoint_filepath = '.\\tmp_checkpoint'
@@ -116,46 +126,112 @@ os.makedirs(checkpoint_filepath, exist_ok=True)
 
 custom_callbacks = [
     EarlyStopping(
-        monitor = 'val_loss',
-        mode = 'min',
+        monitor = 'val_accuracy',
+        mode = 'max',
         patience = 5,
-        verbose = 1
+        verbose = 1,
+        restore_best_weights = True
     ),
     ModelCheckpoint(
-        filepath = os.path.join(checkpoint_filepath, 'best_model.h5'),
-        monitor = 'val_loss',
-        mode = 'min',
+        filepath = os.path.join(checkpoint_filepath, 'best_model.keras'),
+        monitor = 'val_accuracy',
+        mode = 'max',
         verbose = 1,
         save_best_only = True
+    ),
+    ReduceLROnPlateau(
+        monitor = 'val_accuracy',
+        factor = 0.5,
+        patience = 3,
+        min_lr = 1e-7,
+        verbose = 1,
+        mode = 'max'
     )
 ]
 
-# Train network
-num_epochs = 20
+print('\n=== Phase 1: Training with frozen base ===')
+num_epochs = 15
 history = model.fit(
     train_generator,
     epochs = num_epochs,
     steps_per_epoch = len(train_generator),
     validation_data = val_generator,
     validation_steps = len(val_generator),
-    callbacks = custom_callbacks
+    callbacks = custom_callbacks,
+    class_weight = class_weight_dict
 )
-print(history.history)
 
+# --- Phase 2: Fine-tune top layers of base model ---
+print('\n=== Phase 2: Fine-tuning top layers ===')
+efficient_net.trainable = True
+# Freeze all layers except the last 30
+for layer in efficient_net.layers[:-30]:
+    layer.trainable = False
 
-# load the saved model that is considered the best
-best_model = load_model(os.path.join(checkpoint_filepath, 'best_model.h5'))
+model.compile(optimizer = Adam(learning_rate=1e-5), loss='binary_crossentropy', metrics=['accuracy'])
+
+fine_tune_callbacks = [
+    EarlyStopping(
+        monitor = 'val_accuracy',
+        mode = 'max',
+        patience = 5,
+        verbose = 1,
+        restore_best_weights = True
+    ),
+    ModelCheckpoint(
+        filepath = os.path.join(checkpoint_filepath, 'best_model.keras'),
+        monitor = 'val_accuracy',
+        mode = 'max',
+        verbose = 1,
+        save_best_only = True
+    ),
+    ReduceLROnPlateau(
+        monitor = 'val_accuracy',
+        factor = 0.5,
+        patience = 3,
+        min_lr = 1e-8,
+        verbose = 1,
+        mode = 'max'
+    )
+]
+
+fine_tune_epochs = 30
+history_fine = model.fit(
+    train_generator,
+    epochs = fine_tune_epochs,
+    steps_per_epoch = len(train_generator),
+    validation_data = val_generator,
+    validation_steps = len(val_generator),
+    callbacks = fine_tune_callbacks,
+    class_weight = class_weight_dict
+)
+
+# Load the best model
+best_model = load_model(os.path.join(checkpoint_filepath, 'best_model.keras'))
+
+# Evaluate on test set
+print('\n=== Evaluation on Test Set ===')
+test_generator.reset()
+test_loss, test_accuracy = best_model.evaluate(test_generator, steps=len(test_generator), verbose=1)
+print(f'Test Loss: {test_loss:.4f}')
+print(f'Test Accuracy: {test_accuracy:.4f}')
 
 # Generate predictions
 test_generator.reset()
+preds = best_model.predict(test_generator, verbose=1)
+pred_labels = (preds.flatten() > 0.5).astype(int)
+true_labels = test_generator.classes
 
-preds = best_model.predict(
-    test_generator,
-    verbose = 1
-)
+from sklearn.metrics import classification_report, confusion_matrix
+print('\nClassification Report:')
+print(classification_report(true_labels, pred_labels, target_names=['fake', 'real']))
+print('Confusion Matrix:')
+print(confusion_matrix(true_labels, pred_labels))
 
 test_results = pd.DataFrame({
     "Filename": test_generator.filenames,
-    "Prediction": preds.flatten()
+    "Prediction": preds.flatten(),
+    "Predicted_Label": pred_labels,
+    "True_Label": true_labels
 })
 print(test_results)
