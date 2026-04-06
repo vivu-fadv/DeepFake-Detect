@@ -1,7 +1,6 @@
 import csv
 import os
 import shutil
-import numpy as np
 import splitfolders as split_folders
 from PIL import Image
 
