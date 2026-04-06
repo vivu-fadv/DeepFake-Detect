@@ -1,6 +1,4 @@
 import os
-import sys
-import io
 import base64
 import math
 import logging
@@ -13,7 +11,6 @@ from flask import Flask, request, render_template, send_from_directory, jsonify
 from werkzeug.utils import secure_filename
 import uuid
 import threading
-import tensorflow as tf
 from tensorflow.keras.models import load_model
 
 logging.basicConfig(
@@ -30,13 +27,10 @@ ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'wmv'}
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
-# Load the trained model (suppress lz4 I/O warnings)
-MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tmp_checkpoint', 'best_model.h5')
+# Load the trained model
+MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tmp_checkpoint', 'best_model.keras')
 logger.info('Loading model from %s', MODEL_PATH)
-_stderr = sys.stderr
-sys.stderr = io.StringIO()
 model = load_model(MODEL_PATH)
-sys.stderr = _stderr
 logger.info('Model loaded successfully')
 INPUT_SIZE = 128
 

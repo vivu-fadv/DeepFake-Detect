@@ -1,8 +1,7 @@
 import cv2
 from mtcnn import MTCNN
 import csv
-import sys, os.path
-from keras import backend as K
+import os
 import tensorflow as tf
 print(tf.__version__)
 tf.compat.v1.logging.set_verbosity(tf.compat.v1.logging.ERROR)
