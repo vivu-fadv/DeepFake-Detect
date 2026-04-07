@@ -1,5 +1,4 @@
 import os
-import pandas as pd
 import numpy as np
 
 # TensorFlow and tf.keras
@@ -16,22 +15,27 @@ from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from tensorflow.keras.applications import EfficientNetB0
 from tensorflow.keras.applications.efficientnet import preprocess_input
 from tensorflow.keras.models import Sequential, load_model
-from tensorflow.keras.layers import Dense, Dropout
+from tensorflow.keras.layers import Dense, Dropout, BatchNormalization, GlobalAveragePooling2D
 from tensorflow.keras.optimizers import Adam
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint, ReduceLROnPlateau
 
-input_size = 128
+# 224 is EfficientNetB0's native resolution — much better feature extraction than 128
+input_size = 224
 batch_size_num = 32
 train_path = os.path.join(dataset_path, 'train')
 val_path = os.path.join(dataset_path, 'val')
 test_path = os.path.join(dataset_path, 'test')
 
 # preprocess_input scales pixels to [-1, 1] which EfficientNet expects
+# Stronger augmentation for deepfake detection
 train_datagen = ImageDataGenerator(
     preprocessing_function = preprocess_input,
-    rotation_range = 10,
+    rotation_range = 15,
     horizontal_flip = True,
-    zoom_range = 0.1,
+    zoom_range = 0.15,
+    width_shift_range = 0.1,
+    height_shift_range = 0.1,
+    brightness_range = [0.8, 1.2],
     fill_mode = 'nearest'
 )
 
@@ -46,6 +50,16 @@ train_generator = train_datagen.flow_from_directory(
 
 print(f'Class mapping: {train_generator.class_indices}')
 print(f'Train samples - fake: {np.sum(train_generator.classes == 0)}, real: {np.sum(train_generator.classes == 1)}')
+
+# Compute class weights to handle imbalance
+num_fake = np.sum(train_generator.classes == 0)
+num_real = np.sum(train_generator.classes == 1)
+total = num_fake + num_real
+class_weight = {
+    0: total / (2.0 * num_fake),
+    1: total / (2.0 * num_real)
+}
+print(f'Class weights: {class_weight}')
 
 val_datagen = ImageDataGenerator(
     preprocessing_function = preprocess_input
@@ -74,33 +88,91 @@ test_generator = test_datagen.flow_from_directory(
     shuffle = False
 )
 
-# Build model - entire EfficientNetB0 is trainable
+# Build model with frozen base for Phase 1
 efficient_net = EfficientNetB0(
     weights = 'imagenet',
     input_shape = (input_size, input_size, 3),
     include_top = False,
-    pooling = 'max'
+    pooling = None  # We'll add our own pooling
 )
+
+# Freeze the base model for Phase 1
+efficient_net.trainable = False
 
 model = Sequential()
 model.add(efficient_net)
-model.add(Dense(units = 512, activation = 'relu'))
+model.add(GlobalAveragePooling2D())
+model.add(BatchNormalization())
+model.add(Dense(units = 256, activation = 'relu'))
 model.add(Dropout(0.5))
-model.add(Dense(units = 128, activation = 'relu'))
 model.add(Dense(units = 1, activation = 'sigmoid'))
 model.summary()
-
-model.compile(optimizer = Adam(learning_rate=1e-4), loss='binary_crossentropy', metrics=['accuracy'])
 
 checkpoint_filepath = '.\\tmp_checkpoint'
 print('Creating Directory: ' + checkpoint_filepath)
 os.makedirs(checkpoint_filepath, exist_ok=True)
 
-callbacks = [
+# ============================================================
+# Phase 1: Train head only (base frozen), higher learning rate
+# ============================================================
+print('\n=== Phase 1: Training head (base frozen) ===')
+model.compile(
+    optimizer = Adam(learning_rate=1e-3),
+    loss='binary_crossentropy',
+    metrics=['accuracy']
+)
+
+phase1_callbacks = [
     EarlyStopping(
         monitor = 'val_loss',
         mode = 'min',
         patience = 5,
+        verbose = 1,
+        restore_best_weights = True
+    ),
+    ModelCheckpoint(
+        filepath = os.path.join(checkpoint_filepath, 'best_model_phase1.keras'),
+        monitor = 'val_loss',
+        mode = 'min',
+        verbose = 1,
+        save_best_only = True
+    ),
+    ReduceLROnPlateau(
+        monitor = 'val_loss',
+        factor = 0.5,
+        patience = 2,
+        min_lr = 1e-5,
+        verbose = 1
+    )
+]
+
+history_phase1 = model.fit(
+    train_generator,
+    epochs = 15,
+    steps_per_epoch = len(train_generator),
+    validation_data = val_generator,
+    validation_steps = len(val_generator),
+    class_weight = class_weight,
+    callbacks = phase1_callbacks
+)
+
+# ============================================================
+# Phase 2: Unfreeze all layers, fine-tune with very low lr
+# ============================================================
+print('\n=== Phase 2: Fine-tuning entire model ===')
+efficient_net.trainable = True
+
+model.compile(
+    optimizer = Adam(learning_rate=1e-5),
+    loss='binary_crossentropy',
+    metrics=['accuracy']
+)
+
+phase2_callbacks = [
+    EarlyStopping(
+        monitor = 'val_loss',
+        mode = 'min',
+        patience = 7,
         verbose = 1,
         restore_best_weights = True
     ),
@@ -120,19 +192,21 @@ callbacks = [
     )
 ]
 
-print('\n=== Training ===')
-num_epochs = 20
-history = model.fit(
+history_phase2 = model.fit(
     train_generator,
-    epochs = num_epochs,
+    epochs = 30,
     steps_per_epoch = len(train_generator),
     validation_data = val_generator,
     validation_steps = len(val_generator),
-    callbacks = callbacks
+    class_weight = class_weight,
+    callbacks = phase2_callbacks
 )
 
-# Load the best model
+# Load the best model from Phase 2
 best_model = load_model(os.path.join(checkpoint_filepath, 'best_model.keras'))
+
+# Also save a copy for the app
+best_model.save('best_model.keras')
 
 # Evaluate on test set
 print('\n=== Evaluation on Test Set ===')
