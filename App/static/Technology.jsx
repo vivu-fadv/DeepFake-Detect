@@ -26,7 +26,6 @@ function TechnologyPage() {
             number: 1,
             title: 'Video to Frames',
             color: '#6c8cff',
-            file: '00-convert_video_to_image.py',
             description: 'Raw training videos are split into individual image frames. One frame is extracted per second of video using OpenCV. Each frame is automatically scaled based on its resolution to normalize image sizes across the dataset.',
             details: [
                 'Reads MP4 videos from the FaceForensics++ dataset',
@@ -55,7 +54,6 @@ function TechnologyPage() {
             number: 2,
             title: 'Face Detection & Cropping',
             color: '#ff9800',
-            file: '01-crop_faces_with_mtcnn.py',
             description: 'MTCNN (Multi-task Cascaded Convolutional Network) scans each extracted frame to detect faces. Detected faces are cropped with a 30% margin around the bounding box to preserve context like hair and jawline, which helps the model detect manipulation artifacts.',
             details: [
                 'Uses MTCNN deep learning face detector for accurate face localization',
@@ -88,7 +86,6 @@ function TechnologyPage() {
             number: 3,
             title: 'Dataset Preparation',
             color: '#4caf50',
-            file: '02-prepare_fake_real_dataset.py',
             description: 'Cropped face images are organized into "real" and "fake" categories based on FaceForensics++ metadata. Small or corrupted images (<90px) are filtered out. The dataset is then split into training (80%), validation (10%), and test (10%) sets using stratified splitting.',
             details: [
                 'Labels faces as REAL or FAKE using FaceForensics++ CSV metadata',
@@ -123,7 +120,6 @@ function TechnologyPage() {
             number: 4,
             title: 'CNN Training (EfficientNetB0)',
             color: '#f44336',
-            file: '03-train_cnn.py',
             description: 'A two-phase transfer learning approach trains an EfficientNetB0-based classifier. Phase 1 freezes the pre-trained ImageNet backbone and trains only the classification head. Phase 2 unfreezes the entire network for fine-tuning with a very low learning rate, achieving ~92% accuracy.',
             details: [
                 'EfficientNetB0 backbone pre-trained on ImageNet (224\u00d7224 input)',
@@ -197,7 +193,6 @@ function TechnologyPage() {
                             <h2 className="tech-step-title" style={{ color: step.color }}>
                                 Step {step.number}: {step.title}
                             </h2>
-                            <code className="tech-file">{step.file}</code>
                         </div>
                     </div>
                     <p className="tech-step-desc">{step.description}</p>
@@ -221,7 +216,6 @@ function TechnologyPage() {
                         <h2 className="tech-step-title" style={{ color: '#6c8cff' }}>
                             Real-Time Inference
                         </h2>
-                        <code className="tech-file">App/app.py</code>
                     </div>
                 </div>
                 <p className="tech-step-desc">

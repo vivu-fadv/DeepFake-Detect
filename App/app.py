@@ -175,65 +175,76 @@ def extract_faces_from_video(video_path):
 
 
 def create_processed_video(video_path, output_path, face_scores=None):
-    """Re-encode video with face bounding boxes (detection only, no labels)."""
+    """Create video with face bounding boxes using ffmpeg drawbox (much faster than OpenCV)."""
     logger.info('Creating processed video with bounding boxes: %s', output_path)
 
     cap = cv2.VideoCapture(video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    duration = total_frames / fps if fps > 0 else 0
 
-    # Write to a temp file with mp4v codec first
-    temp_path = output_path + '.tmp.mp4'
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    out = cv2.VideoWriter(temp_path, fourcc, fps, (w, h))
+    # Sample a few frames spread across the video to detect faces
+    sample_count = min(5, max(1, int(duration)))  # ~1 sample per second, max 5
+    sample_positions = [int(i * total_frames / sample_count) for i in range(sample_count)]
 
-    if not out.isOpened():
-        logger.error('VideoWriter failed to open: %s', temp_path)
-        cap.release()
-        return
-
-    # Only run detection every N frames; reuse cached overlays in between
-    detect_interval = max(1, int(fps // 3))  # ~3 detections per second
-    frame_count = 0
-    cached_boxes = []  # list of (x1, y1, x2, y2)
-
-    while cap.isOpened():
+    # Collect all face boxes across sampled frames
+    all_boxes = []
+    for pos in sample_positions:
+        cap.set(cv2.CAP_PROP_POS_FRAMES, pos)
         ret, frame = cap.read()
         if not ret:
-            break
-
-        if frame_count % detect_interval == 0:
-            results = face_detector(frame, verbose=False)[0]
-            cached_boxes = []
-
-            for box in results.boxes:
-                if box.conf[0] > 0.5:
-                    bx1, by1, bx2, by2 = map(int, box.xyxy[0])
-                    cached_boxes.append((max(0, bx1), max(0, by1), bx2, by2))
-
-        # Draw face boxes on every frame (green color, no labels)
-        for (x1, y1, x2, y2) in cached_boxes:
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-
-        out.write(frame)
-        frame_count += 1
+            continue
+        results = face_detector(frame, verbose=False)[0]
+        for box in results.boxes:
+            if box.conf[0] > 0.5:
+                bx1, by1, bx2, by2 = map(int, box.xyxy[0])
+                all_boxes.append((max(0, bx1), max(0, by1), bx2, by2))
 
     cap.release()
-    out.release()
-    logger.info('Wrote %d frames to temp file, re-encoding to H.264', frame_count)
 
-    # Re-encode to H.264 for browser compatibility
-    if reencode_to_h264(temp_path, output_path):
-        logger.info('Processed video saved (H.264): %s', output_path)
+    # Build ffmpeg drawbox filter from detected boxes
+    ffmpeg_exe = imageio_ffmpeg.get_ffmpeg_exe()
+    if all_boxes:
+        # Use the most common box region (largest by area) for a stable overlay
+        # Deduplicate similar boxes by averaging nearby ones
+        unique_boxes = []
+        for box in all_boxes:
+            merged = False
+            for i, ub in enumerate(unique_boxes):
+                # If boxes overlap significantly, merge them
+                if (abs(box[0] - ub[0]) < 40 and abs(box[1] - ub[1]) < 40 and
+                        abs(box[2] - ub[2]) < 40 and abs(box[3] - ub[3]) < 40):
+                    unique_boxes[i] = (
+                        (ub[0] + box[0]) // 2, (ub[1] + box[1]) // 2,
+                        (ub[2] + box[2]) // 2, (ub[3] + box[3]) // 2
+                    )
+                    merged = True
+                    break
+            if not merged:
+                unique_boxes.append(box)
+
+        drawbox_filters = []
+        for (x1, y1, x2, y2) in unique_boxes:
+            w = x2 - x1
+            h = y2 - y1
+            drawbox_filters.append(f"drawbox=x={x1}:y={y1}:w={w}:h={h}:color=green:t=2")
+        filter_str = ','.join(drawbox_filters)
     else:
-        logger.error('Failed to re-encode processed video')
+        filter_str = 'null'
 
-    # Clean up temp file
-    try:
-        os.remove(temp_path)
-    except OSError:
-        pass
+    cmd = [
+        ffmpeg_exe, '-y', '-i', video_path,
+        '-vf', filter_str,
+        '-c:v', 'libx264', '-preset', 'fast',
+        '-movflags', '+faststart', '-pix_fmt', 'yuv420p',
+        output_path
+    ]
+    logger.info('Running ffmpeg with %d face boxes', len(all_boxes))
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        logger.error('ffmpeg drawbox failed: %s', result.stderr[-500:])
+    else:
+        logger.info('Processed video saved: %s', output_path)
 
 
 def predict_deepfake(faces):
