@@ -1,13 +1,56 @@
 import os
 import numpy as np
-
+import pandas as pd
 # TensorFlow and tf.keras
 import tensorflow as tf
 print('TensorFlow version: ', tf.__version__)
 
-dataset_path = '.\\split_dataset\\'
 
-tmp_debug_path = '.\\tmp_debug'
+
+def configure_training_device():
+    print('\n=== Device Check ===')
+    print('Built with CUDA:', tf.test.is_built_with_cuda())
+    print('Built with GPU support:', tf.test.is_built_with_gpu_support())
+    build_info = tf.sysconfig.get_build_info()
+    print('TensorFlow CUDA version:', build_info.get('cuda_version', 'unknown'))
+    print('TensorFlow cuDNN version:', build_info.get('cudnn_version', 'unknown'))
+
+    gpus = tf.config.list_physical_devices('GPU')
+    cpus = tf.config.list_physical_devices('CPU')
+
+    if gpus:
+        print(f'Physical GPUs detected: {len(gpus)}')
+        for index, gpu in enumerate(gpus):
+            print(f'  GPU {index}: {gpu}')
+            try:
+                tf.config.experimental.set_memory_growth(gpu, True)
+                print(f'  Memory growth enabled for GPU {index}')
+            except RuntimeError as exc:
+                print(f'  Could not enable memory growth for GPU {index}: {exc}')
+
+        logical_gpus = tf.config.list_logical_devices('GPU')
+        print(f'Logical GPUs available: {len(logical_gpus)}')
+        for index, gpu in enumerate(logical_gpus):
+            print(f'  Logical GPU {index}: {gpu}')
+        print(f'CPUs available: {len(cpus)}')
+        print('Training device selected: /GPU:0')
+        print('GPU training enabled: YES')
+        return '/GPU:0'
+
+    print('Physical GPUs detected: 0')
+    print('Logical GPUs available: 0')
+    print(f'CPUs available: {len(cpus)}')
+    print('Training device selected: /CPU:0')
+    print('GPU training enabled: NO')
+    print('WARNING: No NVIDIA GPU is visible to TensorFlow. Training will run on CPU.')
+    return '/CPU:0'
+
+
+TRAINING_DEVICE = configure_training_device()
+
+dataset_path = './split_dataset/'
+
+tmp_debug_path = './tmp_debug'
 print('Creating Directory: ' + tmp_debug_path)
 os.makedirs(tmp_debug_path, exist_ok=True)
 
@@ -88,25 +131,26 @@ test_generator = test_datagen.flow_from_directory(
     shuffle = False
 )
 
-# Build model with frozen base for Phase 1
-efficient_net = EfficientNetB0(
-    weights = 'imagenet',
-    input_shape = (input_size, input_size, 3),
-    include_top = False,
-    pooling = None  # We'll add our own pooling
-)
+with tf.device(TRAINING_DEVICE):
+    # Build model with frozen base for Phase 1
+    efficient_net = EfficientNetB0(
+        weights = 'imagenet',
+        input_shape = (input_size, input_size, 3),
+        include_top = False,
+        pooling = None  # We'll add our own pooling
+    )
 
-# Freeze the base model for Phase 1
-efficient_net.trainable = False
+    # Freeze the base model for Phase 1
+    efficient_net.trainable = False
 
-model = Sequential()
-model.add(efficient_net)
-model.add(GlobalAveragePooling2D())
-model.add(BatchNormalization())
-model.add(Dense(units = 256, activation = 'relu'))
-model.add(Dropout(0.5))
-model.add(Dense(units = 1, activation = 'sigmoid'))
-model.summary()
+    model = Sequential()
+    model.add(efficient_net)
+    model.add(GlobalAveragePooling2D())
+    model.add(BatchNormalization())
+    model.add(Dense(units = 256, activation = 'relu'))
+    model.add(Dropout(0.5))
+    model.add(Dense(units = 1, activation = 'sigmoid'))
+    model.summary()
 
 checkpoint_filepath = '.\\tmp_checkpoint'
 print('Creating Directory: ' + checkpoint_filepath)
@@ -116,11 +160,13 @@ os.makedirs(checkpoint_filepath, exist_ok=True)
 # Phase 1: Train head only (base frozen), higher learning rate
 # ============================================================
 print('\n=== Phase 1: Training head (base frozen) ===')
-model.compile(
-    optimizer = Adam(learning_rate=1e-3),
-    loss='binary_crossentropy',
-    metrics=['accuracy']
-)
+print('Phase 1 device:', TRAINING_DEVICE)
+with tf.device(TRAINING_DEVICE):
+    model.compile(
+        optimizer = Adam(learning_rate=1e-3),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
 
 phase1_callbacks = [
     EarlyStopping(
@@ -146,27 +192,29 @@ phase1_callbacks = [
     )
 ]
 
-history_phase1 = model.fit(
-    train_generator,
-    epochs = 15,
-    steps_per_epoch = len(train_generator),
-    validation_data = val_generator,
-    validation_steps = len(val_generator),
-    class_weight = class_weight,
-    callbacks = phase1_callbacks
-)
+with tf.device(TRAINING_DEVICE):
+    history_phase1 = model.fit(
+        train_generator,
+        epochs = 15,
+        steps_per_epoch = len(train_generator),
+        validation_data = val_generator,
+        validation_steps = len(val_generator),
+        class_weight = class_weight,
+        callbacks = phase1_callbacks
+    )
 
 # ============================================================
 # Phase 2: Unfreeze all layers, fine-tune with very low lr
 # ============================================================
 print('\n=== Phase 2: Fine-tuning entire model ===')
 efficient_net.trainable = True
-
-model.compile(
-    optimizer = Adam(learning_rate=1e-5),
-    loss='binary_crossentropy',
-    metrics=['accuracy']
-)
+print('Phase 2 device:', TRAINING_DEVICE)
+with tf.device(TRAINING_DEVICE):
+    model.compile(
+        optimizer = Adam(learning_rate=1e-5),
+        loss='binary_crossentropy',
+        metrics=['accuracy']
+    )
 
 phase2_callbacks = [
     EarlyStopping(
@@ -192,30 +240,35 @@ phase2_callbacks = [
     )
 ]
 
-history_phase2 = model.fit(
-    train_generator,
-    epochs = 30,
-    steps_per_epoch = len(train_generator),
-    validation_data = val_generator,
-    validation_steps = len(val_generator),
-    class_weight = class_weight,
-    callbacks = phase2_callbacks
-)
+with tf.device(TRAINING_DEVICE):
+    history_phase2 = model.fit(
+        train_generator,
+        epochs = 30,
+        steps_per_epoch = len(train_generator),
+        validation_data = val_generator,
+        validation_steps = len(val_generator),
+        class_weight = class_weight,
+        callbacks = phase2_callbacks
+    )
 
 # Load the best model from Phase 2
-best_model = load_model(os.path.join(checkpoint_filepath, 'best_model.keras'))
+with tf.device(TRAINING_DEVICE):
+    best_model = load_model(os.path.join(checkpoint_filepath, 'best_model.keras'))
 
 # Also save a copy for the app
 best_model.save('best_model.keras')
 
 # Evaluate on test set
 print('\n=== Evaluation on Test Set ===')
+print('Evaluation device:', TRAINING_DEVICE)
 test_generator.reset()
-test_loss, test_accuracy = best_model.evaluate(test_generator, steps=len(test_generator), verbose=1)
+with tf.device(TRAINING_DEVICE):
+    test_loss, test_accuracy = best_model.evaluate(test_generator, steps=len(test_generator), verbose=1)
 
 # Generate predictions
 test_generator.reset()
-preds = best_model.predict(test_generator, verbose=1)
+with tf.device(TRAINING_DEVICE):
+    preds = best_model.predict(test_generator, verbose=1)
 pred_labels = (preds.flatten() > 0.5).astype(int)
 true_labels = test_generator.classes
 
