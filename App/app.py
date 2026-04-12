@@ -12,12 +12,28 @@ from werkzeug.utils import secure_filename
 import uuid
 import threading
 from tensorflow.keras.models import load_model
+from tensorflow.keras.applications.efficientnet import preprocess_input
+import keras.src.layers.normalization.batch_normalization as _bn_module
 
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S'
 )
+
+# Monkey-patch BatchNormalization to accept legacy renorm kwargs
+_OrigBN = _bn_module.BatchNormalization
+_orig_bn_init = _OrigBN.__init__
+
+
+def _patched_bn_init(self, *args, **kwargs):
+    kwargs.pop('renorm', None)
+    kwargs.pop('renorm_clipping', None)
+    kwargs.pop('renorm_momentum', None)
+    _orig_bn_init(self, *args, **kwargs)
+
+
+_OrigBN.__init__ = _patched_bn_init
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
@@ -32,7 +48,7 @@ MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tmp_checkpoint', 'be
 logger.info('Loading model from %s', MODEL_PATH)
 model = load_model(MODEL_PATH)
 logger.info('Model loaded successfully')
-INPUT_SIZE = 128
+INPUT_SIZE = 224
 
 # Initialize YOLO face detector
 logger.info('Initializing YOLO face detector')
@@ -141,42 +157,60 @@ def create_processed_video(video_path, output_path, face_scores=None):
         cap.release()
         return
 
+    # Only run detection every N frames; reuse cached overlays in between
+    detect_interval = max(1, int(fps // 3))  # ~3 detections per second
     frame_count = 0
+    cached_overlays = []  # list of (x, y, bx2, by2, label, score, color)
+
     while cap.isOpened():
         ret, frame = cap.read()
         if not ret:
             break
-        image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        results = face_detector(frame, verbose=False)[0]
-        for box in results.boxes:
-            if box.conf[0] > 0.5:
-                bx1, by1, bx2, by2 = map(int, box.xyxy[0])
-                bw = bx2 - bx1
-                bh = by2 - by1
-                x, y = max(0, bx1), max(0, by1)
 
-                # Crop and predict this face individually
-                margin_x = int(bw * 0.3)
-                margin_y = int(bh * 0.3)
-                x1 = max(0, bx1 - margin_x)
-                x2 = min(w, bx2 + margin_x)
-                y1 = max(0, by1 - margin_y)
-                y2 = min(h, by2 + margin_y)
-                crop = image_rgb[y1:y2, x1:x2]
-                if crop.size > 0:
-                    crop_resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE))
-                    face_input = np.array([crop_resized], dtype='float32') / 255.0
-                    score = float(model.predict(face_input, verbose=0)[0][0])
-                else:
-                    score = 0.0
+        if frame_count % detect_interval == 0:
+            image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = face_detector(frame, verbose=False)[0]
+            cached_overlays = []
+            face_crops = []
+            box_coords = []
 
-                is_real = score > 0.5
-                label = 'REAL' if is_real else 'FAKE'
-                color = (0, 255, 0) if is_real else (0, 0, 255)
-                cv2.rectangle(frame, (x, y), (bx2, by2), color, 2)
-                text = f'{label} {score:.2f}'
-                cv2.putText(frame, text, (x, y - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+            for box in results.boxes:
+                if box.conf[0] > 0.5:
+                    bx1, by1, bx2, by2 = map(int, box.xyxy[0])
+                    bw = bx2 - bx1
+                    bh = by2 - by1
+                    x, y = max(0, bx1), max(0, by1)
+
+                    margin_x = int(bw * 0.3)
+                    margin_y = int(bh * 0.3)
+                    x1 = max(0, bx1 - margin_x)
+                    x2 = min(w, bx2 + margin_x)
+                    y1 = max(0, by1 - margin_y)
+                    y2 = min(h, by2 + margin_y)
+                    crop = image_rgb[y1:y2, x1:x2]
+                    if crop.size > 0:
+                        crop_resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE))
+                        face_crops.append(crop_resized)
+                        box_coords.append((x, y, bx2, by2))
+
+            # Batch-predict all faces at once
+            if face_crops:
+                batch = preprocess_input(np.array(face_crops, dtype='float32'))
+                scores = model.predict(batch, verbose=0).flatten()
+                for (x, y, bx2, by2), score in zip(box_coords, scores):
+                    score = float(score)
+                    is_real = score > 0.5
+                    label = 'REAL' if is_real else 'FAKE'
+                    color = (0, 255, 0) if is_real else (0, 0, 255)
+                    cached_overlays.append((x, y, bx2, by2, label, score, color))
+
+        # Draw cached overlays on every frame
+        for (x, y, bx2, by2, label, score, color) in cached_overlays:
+            cv2.rectangle(frame, (x, y), (bx2, by2), color, 2)
+            text = f'{label} {score:.2f}'
+            cv2.putText(frame, text, (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
         out.write(frame)
         frame_count += 1
 
@@ -204,7 +238,7 @@ def predict_deepfake(faces):
 
     logger.info('Running prediction on %d face(s)', len(faces))
 
-    face_array = np.array(faces, dtype='float32') / 255.0
+    face_array = preprocess_input(np.array(faces, dtype='float32'))
     predictions = model.predict(face_array, verbose=0)
     avg_prediction = float(np.mean(predictions))
 
