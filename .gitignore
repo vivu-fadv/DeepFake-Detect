@@ -137,3 +137,4 @@ mtcnn/
 /prepared_dataset
 /App/uploads
 archive.zip
+App/diag_log.txt
