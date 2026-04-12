@@ -6,6 +6,7 @@ import subprocess
 import cv2
 import numpy as np
 import imageio_ffmpeg
+from mtcnn import MTCNN
 from ultralytics import YOLO
 from flask import Flask, request, render_template, send_from_directory, jsonify
 from werkzeug.utils import secure_filename
@@ -15,10 +16,13 @@ from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.efficientnet import preprocess_input
 import keras.src.layers.normalization.batch_normalization as _bn_module
 
+import sys
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s [%(levelname)s] %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    stream=sys.stderr
 )
 
 # Monkey-patch BatchNormalization to accept legacy renorm kwargs
@@ -49,8 +53,14 @@ logger.info('Loading model from %s', MODEL_PATH)
 model = load_model(MODEL_PATH)
 logger.info('Model loaded successfully')
 INPUT_SIZE = 224
+MIN_FACE_SIZE = 90  # same as 02-prepare_fake_real_dataset.py
 
-# Initialize YOLO face detector
+# Initialize MTCNN face detector (same as training pipeline 01-crop_faces_with_mtcnn.py)
+logger.info('Initializing MTCNN face detector')
+mtcnn_detector = MTCNN()
+logger.info('MTCNN face detector ready')
+
+# Initialize YOLO face detector (for processed video overlay only)
 logger.info('Initializing YOLO face detector')
 FACE_MODEL_PATH = os.path.join(os.path.dirname(__file__), 'yolov8n-face.pt')
 face_detector = YOLO(FACE_MODEL_PATH)
@@ -98,7 +108,26 @@ def reencode_to_h264(input_path, output_path=None):
     return True
 
 
+def scale_frame(frame):
+    """Scale frame exactly like 00-convert_video_to_image.py"""
+    h, w = frame.shape[:2]
+    if w < 300:
+        scale_ratio = 2
+    elif w > 1900:
+        scale_ratio = 0.33
+    elif w > 1000:
+        scale_ratio = 0.5
+    else:
+        scale_ratio = 1
+    if scale_ratio != 1:
+        new_w = int(w * scale_ratio)
+        new_h = int(h * scale_ratio)
+        frame = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    return frame
+
+
 def extract_faces_from_video(video_path):
+    """Extract faces using MTCNN — matching training pipeline (01-crop_faces_with_mtcnn.py)."""
     logger.info('Extracting faces from video: %s', video_path)
     faces = []
     cap = cv2.VideoCapture(video_path)
@@ -114,21 +143,31 @@ def extract_faces_from_video(video_path):
         if not ret:
             break
         if frame_id % math.floor(frame_rate) == 0:
+            # Step 1: Scale frame (same as 00-convert_video_to_image.py)
+            frame = scale_frame(frame)
             image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             h, w = image_rgb.shape[:2]
-            results = face_detector(frame, verbose=False)[0]
-            for box in results.boxes:
-                if box.conf[0] > 0.5:
-                    bx1, by1, bx2, by2 = map(int, box.xyxy[0])
-                    bw = bx2 - bx1
-                    bh = by2 - by1
-                    margin_x = int(bw * 0.3)
-                    margin_y = int(bh * 0.3)
-                    x1 = max(0, bx1 - margin_x)
-                    x2 = min(w, bx2 + margin_x)
-                    y1 = max(0, by1 - margin_y)
-                    y2 = min(h, by2 + margin_y)
+
+            # Step 2: MTCNN face detection (same as 01-crop_faces_with_mtcnn.py)
+            results = mtcnn_detector.detect_faces(image_rgb)
+            num_faces = len(results)
+
+            for result in results:
+                bounding_box = result['box']
+                confidence = result['confidence']
+                # Same logic as training: if single face keep it, if multiple only keep > 0.95
+                if num_faces < 2 or confidence > 0.95:
+                    bx, by, bw, bh = bounding_box
+                    margin_x = bw * 0.3
+                    margin_y = bh * 0.3
+                    x1 = int(max(0, bx - margin_x))
+                    x2 = int(min(w, bx + bw + margin_x))
+                    y1 = int(max(0, by - margin_y))
+                    y2 = int(min(h, by + bh + margin_y))
                     crop = image_rgb[y1:y2, x1:x2]
+                    # Step 3: Filter small faces (same as 02-prepare_fake_real_dataset.py MIN_IMAGE_SIZE=90)
+                    if crop.shape[0] < MIN_FACE_SIZE or crop.shape[1] < MIN_FACE_SIZE:
+                        continue
                     if crop.size > 0:
                         crop_resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE))
                         faces.append(crop_resized)
@@ -139,7 +178,7 @@ def extract_faces_from_video(video_path):
 
 
 def create_processed_video(video_path, output_path, face_scores=None):
-    """Re-encode video with face bounding boxes and per-face REAL/FAKE label."""
+    """Re-encode video with face bounding boxes (detection only, no labels)."""
     logger.info('Creating processed video with bounding boxes: %s', output_path)
 
     cap = cv2.VideoCapture(video_path)
@@ -160,7 +199,7 @@ def create_processed_video(video_path, output_path, face_scores=None):
     # Only run detection every N frames; reuse cached overlays in between
     detect_interval = max(1, int(fps // 3))  # ~3 detections per second
     frame_count = 0
-    cached_overlays = []  # list of (x, y, bx2, by2, label, score, color)
+    cached_boxes = []  # list of (x1, y1, x2, y2)
 
     while cap.isOpened():
         ret, frame = cap.read()
@@ -168,48 +207,17 @@ def create_processed_video(video_path, output_path, face_scores=None):
             break
 
         if frame_count % detect_interval == 0:
-            image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             results = face_detector(frame, verbose=False)[0]
-            cached_overlays = []
-            face_crops = []
-            box_coords = []
+            cached_boxes = []
 
             for box in results.boxes:
                 if box.conf[0] > 0.5:
                     bx1, by1, bx2, by2 = map(int, box.xyxy[0])
-                    bw = bx2 - bx1
-                    bh = by2 - by1
-                    x, y = max(0, bx1), max(0, by1)
+                    cached_boxes.append((max(0, bx1), max(0, by1), bx2, by2))
 
-                    margin_x = int(bw * 0.3)
-                    margin_y = int(bh * 0.3)
-                    x1 = max(0, bx1 - margin_x)
-                    x2 = min(w, bx2 + margin_x)
-                    y1 = max(0, by1 - margin_y)
-                    y2 = min(h, by2 + margin_y)
-                    crop = image_rgb[y1:y2, x1:x2]
-                    if crop.size > 0:
-                        crop_resized = cv2.resize(crop, (INPUT_SIZE, INPUT_SIZE))
-                        face_crops.append(crop_resized)
-                        box_coords.append((x, y, bx2, by2))
-
-            # Batch-predict all faces at once
-            if face_crops:
-                batch = preprocess_input(np.array(face_crops, dtype='float32'))
-                scores = model.predict(batch, verbose=0).flatten()
-                for (x, y, bx2, by2), score in zip(box_coords, scores):
-                    score = float(score)
-                    is_real = score > 0.5
-                    label = 'REAL' if is_real else 'FAKE'
-                    color = (0, 255, 0) if is_real else (0, 0, 255)
-                    cached_overlays.append((x, y, bx2, by2, label, score, color))
-
-        # Draw cached overlays on every frame
-        for (x, y, bx2, by2, label, score, color) in cached_overlays:
-            cv2.rectangle(frame, (x, y), (bx2, by2), color, 2)
-            text = f'{label} {score:.2f}'
-            cv2.putText(frame, text, (x, y - 10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+        # Draw face boxes on every frame (green color, no labels)
+        for (x1, y1, x2, y2) in cached_boxes:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
         out.write(frame)
         frame_count += 1
@@ -240,14 +248,29 @@ def predict_deepfake(faces):
 
     face_array = preprocess_input(np.array(faces, dtype='float32'))
     predictions = model.predict(face_array, verbose=0)
-    avg_prediction = float(np.mean(predictions))
+    flat_preds = predictions.flatten()
+    # Use top-K mean: average the top 30% of predictions (at least 3)
+    # Rationale: real videos have many high-confidence real frames; fake videos have NONE
+    sorted_desc = np.sort(flat_preds)[::-1]  # highest first
+    k = max(3, int(len(sorted_desc) * 0.3))
+    top_k = sorted_desc[:k]
+    avg_prediction = float(np.mean(top_k))
+    # Write diagnostics to file
+    diag_path = os.path.join(os.path.dirname(__file__), 'diag_log.txt')
+    with open(diag_path, 'a') as f:
+        f.write(f'Raw predictions: min={float(np.min(predictions)):.4f}, max={float(np.max(predictions)):.4f}, top{k}_mean={avg_prediction:.4f}, mean={float(np.mean(predictions)):.4f}\n')
+        f.write(f'All scores (sorted desc): {sorted_desc.tolist()}\n')
+        f.write(f'Top-{k} used: {top_k.tolist()}\n')
+        f.write(f'Num faces: {len(faces)}\n\n')
+    logger.info('Raw predictions: min=%.4f, max=%.4f, top%d_mean=%.4f, mean=%.4f, n=%d',
+                float(np.min(predictions)), float(np.max(predictions)),
+                k, avg_prediction, float(np.mean(flat_preds)), len(flat_preds))
 
-    # Build per-face details (up to 3 evenly spaced faces)
-    total = len(faces)
-    if total <= 3:
-        indices = list(range(total))
-    else:
-        indices = [0, total // 2, total - 1]
+    # Build per-face details (up to 5 faces sorted by relevance)
+    is_real = avg_prediction > 0.5
+    # Sort face indices by score: highest first for REAL, lowest first for FAKE
+    sorted_indices = np.argsort(flat_preds)[::-1] if is_real else np.argsort(flat_preds)
+    indices = sorted_indices[:5].tolist()
 
     faces_detail = []
     for i in indices:
@@ -256,8 +279,8 @@ def predict_deepfake(faces):
             'score': float(predictions[i][0])
         })
 
-    logger.info('Prediction complete — avg score: %.4f, faces: %d', avg_prediction, total)
-    return avg_prediction, total, faces_detail
+    logger.info('Prediction complete — avg score: %.4f, faces: %d', avg_prediction, len(faces))
+    return avg_prediction, len(faces), faces_detail
 
 
 def cleanup_old_uploads(exclude=None):
@@ -378,4 +401,4 @@ def job_status(job_id):
 
 if __name__ == '__main__':
     logger.info('Starting Flask server on http://0.0.0.0:5000')
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    app.run(debug=False, host='0.0.0.0', port=5000)
