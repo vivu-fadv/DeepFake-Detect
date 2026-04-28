@@ -39,13 +39,19 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 app.config['UPLOAD_FOLDER'] = os.path.join(os.path.dirname(__file__), 'uploads')
-app.config['MAX_CONTENT_LENGTH'] = 200 * 1024 * 1024  # 200 MB limit
+app.config['MAX_CONTENT_LENGTH'] = int(os.environ.get('MAX_UPLOAD_MB', 50)) * 1024 * 1024
 ALLOWED_EXTENSIONS = {'mp4', 'avi', 'mov', 'mkv', 'wmv'}
 
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 
 # Load the trained model
-MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tmp_checkpoint', 'best_model.keras')
+MODEL_PATH = os.environ.get(
+    'MODEL_PATH',
+    os.path.join(os.path.dirname(__file__), 'models', 'best_model.keras')
+)
+if not os.path.exists(MODEL_PATH):
+    # Fallback for local development
+    MODEL_PATH = os.path.join(os.path.dirname(__file__), '..', 'tmp_checkpoint', 'best_model.keras')
 logger.info('Loading model from %s', MODEL_PATH)
 model = load_model(MODEL_PATH)
 logger.info('Model loaded successfully')
@@ -309,5 +315,6 @@ app.register_blueprint(routes)
 
 
 if __name__ == '__main__':
-    logger.info('Starting Flask server on http://0.0.0.0:5000')
-    app.run(debug=False, host='0.0.0.0', port=5000)
+    port = int(os.environ.get('PORT', 7860))
+    logger.info('Starting Flask server on http://0.0.0.0:%d', port)
+    app.run(debug=False, host='0.0.0.0', port=port)
