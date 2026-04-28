@@ -12,6 +12,7 @@ from flask import Flask
 from tensorflow.keras.models import load_model
 from tensorflow.keras.applications.efficientnet import preprocess_input
 import keras.src.layers.normalization.batch_normalization as _bn_module
+import keras.src.layers.core.dense as _dense_module
 
 import sys
 
@@ -35,6 +36,18 @@ def _patched_bn_init(self, *args, **kwargs):
 
 
 _OrigBN.__init__ = _patched_bn_init
+
+# Monkey-patch Dense to accept quantization_config from newer Keras
+_OrigDense = _dense_module.Dense
+_orig_dense_init = _OrigDense.__init__
+
+
+def _patched_dense_init(self, *args, **kwargs):
+    kwargs.pop('quantization_config', None)
+    _orig_dense_init(self, *args, **kwargs)
+
+
+_OrigDense.__init__ = _patched_dense_init
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
